@@ -1,0 +1,694 @@
+---
+title: "Portugese Bank Marketing Calls"
+author: "Le Thuc Anh"
+date: "6/26/2022"
+output: 
+  pdf_document: 
+    number_sections: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 10, fig.height = 5, tidy.opts=list(width.cutoff=60), tidy=TRUE)
+```
+
+# Packages installation & dataset import  
+
+Requring packages and setting options in R  
+```{r packages&options, results= 'hide'}
+# Require packages
+Packages <- c("data.table", "tidyverse", "ggplot2", "caret", "gridExtra", 
+              "rpart", "randomForest", "rattle", "AUC")
+# Print non-scientific number with maximum 4 signifcant digits 
+options("scipen" = 999, "digits" = 4)
+```
+
+```{r, include = FALSE}
+lapply(Packages, require, character.only = TRUE)
+```
+
+```{r, results='hide'}
+# Marketing Portugese Bank dataset:
+# https://archive.ics.uci.edu/ml/datasets/bank+marketing
+# https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank.zip
+# https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank-additional.zip
+```
+
+```{r, include = FALSE}
+
+zip1 <- tempfile()
+download.file("https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank-additional.zip", zip1)
+bank_full <- fread(unzip(zip1,"bank-additional/bank-additional-full.csv"))
+
+# rename column to avoid error while running models
+setnames(bank_full, c("emp.var.rate", "cons.price.idx", "cons.conf.idx", "nr.employed") , 
+         c("emp_var_rate", "cons_price_idx", "cons_conf_idx", "nr_employed"))
+```
+
+# Introduction
+
+The data is related with direct marketing campaigns of a **Portuguese banking institution**. The marketing campaigns were based on phone calls. Often, more than one contact to the same client was required, in order to access if the product (bank term deposit) would be (**yes**) subscribed or not (**no**) subscribed.  
+
+The classification goal is to predict if the client will **subscribe a term deposit** (variable _y_).  
+
+Let's see the details of **Portugese bank dataset** by using functions below:  
+```{r}
+str(bank_full)
+```
+The **Portugese bank dataset** has 21 columns and 41188 rows. There are _41188 contacted times_ and _20 features of the customers_:  
+- 11 client-related features  
+
+1 - age (numeric)  
+
+2 - job : type of job (categorical: 'admin.','blue-collar','entrepreneur','housemaid','management','retired','self-employed','services','student','technician','unemployed','unknown')  
+
+3 - marital : marital status (categorical: 'divorced','married','single','unknown'; note: 'divorced' means divorced or widowed)  
+
+4 - education (categorical:  'basic.4y','basic.6y','basic.9y','high.school','illiterate',  
+'professional.course','university.degree','unknown')  
+
+5 - default: has credit in default? (categorical: 'no','yes','unknown')  
+
+6 - housing: has housing loan? (categorical: 'no','yes','unknown')  
+
+7 - loan: has personal loan? (categorical: 'no','yes','unknown')  
+
+Related with the last contact of the current campaign:  
+
+8 - contact: contact communication type (categorical: 'cellular','telephone')  
+
+9 - month: last contact month of year (categorical: 'jan', 'feb', 'mar', ..., 'nov', 'dec')  
+
+10 - day_of_week: last contact day of the week (categorical: 'mon','tue','wed','thu','fri')  
+
+11 - duration: last contact duration, in seconds (numeric).   
+
+- 4 other features  
+
+12 - campaign: number of contacts performed during this campaign and for this client (numeric, includes last contact)  
+
+13 - pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric; 999 means client was not previously contacted)  
+
+14 - previous: number of contacts performed before this campaign and for this client (numeric)  
+
+15 - poutcome: outcome of the previous marketing campaign (categorical: 'failure','nonexistent','success')  
+
+- 5 social and economic features  
+
+16 - emp_var_rate: employment variation rate - quarterly indicator (numeric)  
+17 - cons_price_idx: consumer price index - monthly indicator (numeric)  
+
+18 - cons_conf_idx: consumer confidence index - monthly indicator (numeric)  
+19 - euribor3m: euribor 3 month rate - daily indicator (numeric)  
+
+20 - nr_employed: number of employees - quarterly indicator (numeric)  
+  
+  
+  
+So, this project will focus on **predict whether one contact in the dataset resulted in a bank term deposit or not**.
+
+# Data cleaning
+
+Let's evaluate how clean the dataset is:
+
+```{r, check nulls}
+sum(is.na(bank_full)) # NA or null values
+```
+
+There are no missing values in the dataset.
+
+Let's standardize the class of each features in the dataset.  
+```{r}
+fn.change.class <- function(dt, datecol=NULL, factorcol=NULL){
+        strTmp <- which(sapply(dt, class) != "character")
+        dt[, (strTmp):=lapply(.SD, as.numeric), .SDcols=strTmp]
+        if (length(datecol)){
+                dt[, (datecol):=lapply(.SD, 
+                                       function(x){
+                                         as.Date(trunc(as.POSIXct(x, origin="1970-01-01"), "day"))}),
+                   .SDcols=datecol]
+        }
+        if (length(factorcol)){
+                dt[, (factorcol):=lapply(.SD, as.factor), .SDcols=factorcol]
+        }
+        return(dt)
+}
+bank_full = fn.change.class(bank_full)
+str(bank_full)
+```
+Let's check the correlation between numeric features of the dataset.  
+```{r}
+strTmp <- which(sapply(bank_full, class) == "numeric")
+bank_full_num = bank_full[, .SD, .SDcols=strTmp]
+cor_bankfull = cor(bank_full_num)
+cor_bankfull>= 0.8
+```
+We see that _euribor3m_ and _nr_employed_ is highly correlated. So that, we will remove _euribor3m_.  
+```{r}
+bank_full$euribor3m = NULL
+```
+  
+# Data Exploration
+
+Once again, here are the summary of the *Portugese Bank Dataset*:
+
+```{r, summary}
+summary(bank_full)
+```
+
+And, let's check how imbalance the dataset is:
+
+```{r, imbalance}
+no_y = bank_full[, .N , by = y]
+no_y[, perc_N := (N/ sum(N))*100]
+no_y
+```
+
+The dataset is skewed towards **no** with 88.73% of the contacts are resulted in **no** answer to bank term deposit. Which resulted in a ratio of **yes**:**no** as 1:7.8.  
+
+So, there is no need of further fixing to leverage the lesser group.  
+
+## Demographic
+
+Let's explore how different in demographic for each group of subcription **yes** and **no**
+
+```{r, echo=FALSE}
+bank_full %>% 
+  ggplot( aes(x=age)) +
+    geom_histogram( binwidth=3, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  facet_grid(cols = vars(y)) +
+    ggtitle("Age of clients") 
+```
+By observing this barplot, we could see that the age for both groups are quite similar with the highest number at around 25 to 40 years old.  
+
+```{r,echo=FALSE}
+bank_full %>% 
+  ggplot( aes(x = job), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip()  +
+    ggtitle("Job of clients") 
+```
+For **no** group, the two dominant job title is _blue-collar_ and _admin._. While for **yes** group, the dominants also see in _technician_ and following up is _retired_ group.  
+
+```{r,echo=FALSE}
+bank_full %>% 
+  ggplot( aes(x=marital), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") +
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Marital status of clients") 
+```
+The class _unknown_ is extremely small indicate that our data completeness is quite good and that this data could be trusted.  
+The group _married_ is the most popular for both **yes** and **no** group.  
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = education), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Education of clients") 
+```
+The most popular are _university.degree_ and _high.school_ for both **yes** and **no**. However, in **yes** group, we could see the rising of _basic.4y_ as compared to the second popular group _professional.course_ and _basic.9y_.  
+
+## Bank-related features
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = loan), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip()  +
+    ggtitle("Clients have loan?") 
+```
+The proportion of having loan and not having loan for **yes** group and **no** group are similar.  
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = contact), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip()  +
+    ggtitle("Clients have been contacted through which channel?") 
+```
+Clients are being contacted through _cellular_ more than _telephone_.  
+
+```{r, echo = FALSE}
+bank_full$month <- factor(bank_full$month,levels = c("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))
+bank_full %>% 
+  ggplot( aes(x = month), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Clients have been contacted in which month?") 
+```
+Clients are contacted a lot in _may_ but in _mar_, _sep_, _oct_ and _dec_ has the number of **yes** and **no** clients in equal.  
+
+```{r, echo = FALSE}
+bank_full$day_of_week <- factor(bank_full$day_of_week,levels = c("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
+bank_full %>% 
+  ggplot( aes(x = day_of_week), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Clients have been contacted in which day of the week?") 
+```
+Clients are contacted similarly throughout the week, except 2 days of weekends (none contact was made in _sat_ and _sun_).  
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = duration), ) +
+  geom_histogram(fill = "#69b3a2", color = "#e9ecef", bins = 15) + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Clients have been contacted for how long?") 
+```
+It seems that clients that said **yes** seems to be contacted longer than the **no** group.  
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = campaign), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip()  +
+    ggtitle("Clients have been contacted for how many campaign?") 
+```
+It is similar between both groups in the number of historic campaigns.  
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = poutcome), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("The result of the previous campaign")
+```
+The _success_ of the previous campaign has a greater portions in **yes** group than in **no** group.  
+
+```{r, echo = FALSE}
+bank_full %>% 
+  ggplot( aes(x = default), ) +
+  geom_bar(fill = "#69b3a2", color = "#e9ecef") + 
+   facet_grid(cols = vars(y)) +
+    coord_flip() +
+    ggtitle("Clients have any loan in default?")
+```
+Most clients in **yes** group do not have a  loan in default.  
+
+# Split train/validation/test data  
+
+As this project will run several models, the **Portugese Bank dataset** will be divided into 3 parts: Train(60%), Test(20%) and Validation(20%).
+
+Firstly, let's transform column y to factors for our models to do classification correctly.
+```{r, as factor}
+# Transform y into factors
+bank_full$y = as.factor(bank_full$y)
+str(bank_full)
+```
+
+Secondly, split the dataset:
+```{r, split dataset, results= 'hide'}
+set.seed(123)
+spec = c(train = .6, validation = .2, test = .2)
+set.seed(123)
+g = sample(cut(
+  seq(nrow(bank_full)), 
+  nrow(bank_full)*cumsum(c(0,spec)),
+  labels = names(spec)
+))
+
+# Split into train, test, validation dataset
+res = split(bank_full, g)
+# Move all dataset to global environment
+list2env(res,globalenv())
+
+```
+Now, we are having 3 different parts of the dataset.
+Let's check again our 3 datasets
+
+```{r, print train}
+print(train)
+```
+
+Our train dataset has 24,712 rows and has the same number of columns
+
+```{r, print validation}
+print(validation)
+```
+
+Our validation dataset has 8,238 rows and has the same number of columns. 
+```{r, print test}
+print(test)
+```
+
+Our test dataset has 8,238 rows and has the same number of columns.  
+
+# Methods & Analysis
+This project will use 3 different algorithms to predict the **yes** and **no** label in the dataset.  
+1 - Decision Tree  
+2 - Random Forest  
+3 - Logistic Regression  
+These 3 models will be trained on _train_ set and validate on _validation_ set of data to evaluate the model.  
+
+To select the best performing model, AUC and F1-score will both be used (our dataset are quite imbalanced so that F1_score is used). The best model will be tested on the _test_ set of data for final results.  
+
+# Model 1 - Decision Tree classification  
+
+## Decision Tree model training
+Our first model - The _Decision Tree_ model will be used through the function below:
+```{r, train decis}
+decis_tree = rpart(formula = y ~ ., data = train)
+```
+Let's see the importance of **Portugese bank dataset** features
+```{r, varImp decis}
+varImp(decis_tree)
+```
+The model stated that feature _Number of employees_ is the most important feature when it classify between **yes** or **no**. Follow up is _euribor3m_ in the second place and _nr_employed_ in the third place.  
+
+
+To see the detailed result of our model, let's plot the result:
+```{r, fancyrpartplot}
+fancyRpartPlot(decis_tree, cex = 0.8, caption = "Decision Tree model results")
+```
+The cutoff for feature _nr_employed_ is *5088* and later on feature _duration_ have several cutoffs to determine the value of _y_
+
+## Decision Tree model validation
+Now, let's test this decision tree model in the _validation_ set:
+
+```{r, predicting using decision tree model}
+decis_pred = predict(decis_tree, validation, type = 'class')
+```
+
+## F1 Score of Decision tree model  
+To see how good our model is doing, Confusion Matrix is a simple tool for quick evaluation. 
+```{r, confmatrix decis}
+confusionMatrix(data = decis_pred, reference = validation$y, positive = "yes")
+```
+Calculated the Confusion Matrix, we have:  
+The _sensitivity_ is  
+```{r, decistree model sensitivity}
+dtree_sense = caret::sensitivity(decis_pred, validation$y)
+print(dtree_sense)
+```
+  
+The _specificity_ is  
+```{r, decistree model specificity}
+dtree_spec = caret::specificity(decis_pred, validation$y)
+print(dtree_spec)
+```
+The _F1 score_ is  
+```{r, F1_score}
+decis_f1 = 2*(dtree_sense * dtree_spec)/(dtree_sense + dtree_spec)
+print(decis_f1)
+```
+ 
+
+We know that increasing precision will decrease recall, and vice versa. So that our _F1 score_ is quite in the middle in the range from 0 to 1.
+
+## AUC of Decision Tree model  
+The _AUC_ of _Decision Tree_ model is  
+```{r, AUC decis}
+decis_AUC = round(AUC::auc(roc(decis_pred, validation$y)),2)
+print(decis_AUC)
+```
+So that, Decision Tree model has a better-than-average AUC.   
+
+
+# Model 2 - Random Forest 
+The second model we are trying to classify our dataset is _Random Forest_  
+
+## Random Forest model training  
+
+Let's train the _Random Forest_ model using the train dataset.  
+```{r, rf train, echo = FALSE}
+rf_fit = randomForest(y~., train, importance = TRUE)
+```
+
+## Random Forest model validation  
+
+Let's test the _Random Forest_ model in the _validation_ dataset.  
+
+```{r, rf pred}
+rf_pred = predict(rf_fit, validation)
+head(rf_pred)
+```
+Before tuning, the AUC of _Random Forest_ model is  
+
+```{r}
+rf_AUC = round(AUC::auc(roc(rf_pred, validation$y)),2)
+print(rf_AUC)
+```
+
+## Tuning the model  
+
+One parameter of _Random Forest_ could be tuning is the number of trees. So that, we will fit the model with a sequence of different trees's numbers to see how the model turns out.
+```{r, tuned tree numbers}
+rf_tuned_trees <- seq(from=1, to=200, by=10)
+print(rf_tuned_trees)
+```
+
+```{r, train with rf trees}
+rf_tuned = data.frame(matrix(ncol = 2, nrow = 0))
+
+for (i in rf_tuned_trees) {
+  fit = randomForest(y~. , train, ntree = i, importance = TRUE)
+  pred =  predict(fit, validation)
+  auc = AUC::auc(roc(pred, validation$y))
+  result = cbind(i, auc)
+  rf_tuned = rbind(rf_tuned, result)
+}
+rf_tuned_results = rf_tuned[rf_tuned$auc == max(rf_tuned$auc),]
+rf_tuned_results
+```
+So that, the best performance number of trees is  
+```{r}
+rf_tuned_results$i
+```
+
+So, let's predict the _validation_ dataset:  
+```{r, rf tuned train pred}
+rf_tuned_fit = randomForest(y~. , train, ntree = rf_tuned_results$i, importance = TRUE)
+rf_tuned_pred = predict(fit, validation, type = 'class')
+```
+
+## F1 score of Random Forest model  
+
+Here is the confusion matrix of the tuned _Random Forest_ model:
+```{r, confmatrix rf}
+confusionMatrix(data = rf_tuned_pred, reference = validation$y, positive = "yes")
+```
+Calculated the Confusion Matrix, we have:  
+
+The _sensitivity_ is  
+```{r, rf model sensitivity}
+rf_sense = caret::sensitivity(rf_tuned_pred, validation$y)
+print(rf_sense)
+```
+The _specificity_ is  
+```{r, rf model specificity}
+rf_spec = caret::specificity(rf_tuned_pred, validation$y)
+print(rf_spec)
+```
+The _F1 score_ of _Random Forest_ model is 
+```{r, rf F1_score}
+rf_f1 = 2*(rf_sense * rf_spec)/(rf_sense + rf_spec)
+print(rf_f1)
+```
+The _F1 score_ of _Random Forest_ model is better than _Decision Tree_ model _F1 score_.  
+
+## AUC of Random Forest model  
+The _Random Forest_ model AUC is
+```{r, AUC rf}
+rf_tuned_AUC = round(AUC::auc(roc(rf_pred, validation$y)),2)
+print(rf_tuned_AUC)
+```
+
+# Model 3 - Logistic Regression
+The third model we are trying to classify our dataset is _Logistic Regression_.  
+
+## Logistic Regression model training  
+
+```{r, glm train}
+glm_fit = glm(y ~ ., family = "binomial", data = train)
+```
+
+```{r, varImp glm}
+varImp(glm_fit)
+```
+The model stated that feature _duration_ is the most important feature when it classify between *yes* or *no*. Follow up is _monthmay_ (May in month) in the second place and _monthnov_ (Nov in month) in the third place.  
+
+## Logistic Regression model validation  
+
+```{r, predicting using logistic regression model}
+glm_res = predict(glm_fit, validation, type = 'response')
+head(glm_res)
+```
+After predict the y in the _test set_, we could see that the predict function for _Logistic Resgression_ model returns a vector of probabilities.  
+Our next task is to find the best threshold to determine whether one probability is *yes* or *no*.  
+
+## Calculating threshold value
+Good threshold value is the number classify *yes* and *no* with the minimum number of error class.   
+So that, we will try different threshold to find the best one:
+```{r, threshold glm }
+prob = seq(0, 1, length.out = 10)
+error = data.frame(matrix(ncol = 3, nrow = 0))
+for (i in prob) {
+  split = ifelse(glm_res >= i, 'yes', 'no')
+  error_yes = 100*sum(ifelse(split == 'yes' & validation$y=='no', 1,0))/length(split)
+  error_no = 100*sum(ifelse(split == 'no' & validation$y=='yes', 1,0))/length(split)
+  auc = round(AUC::auc(roc(split, validation$y)),2)
+  col = cbind(i,auc, error_yes, error_no, tot_error = sum(error_yes, error_no))
+  error = rbind(error,col)
+  
+} 
+error_results = error[error$auc == max(error$auc),]
+print(error_results)
+```
+So that, the threshold *0.1111* is the threshold with the highest AUC with only 13% guessing wrong for **yes**. We will use this to evaluate the model.
+
+The code below will determine either a client in _validation_ dataset is **yes** or **no**.  
+```{r, glm pred}
+glm_pred = factor(ifelse(glm_res >= error_results$i , "yes", "no"), levels = levels(validation$y))
+```
+
+
+## F1 Score of Logistic Regression model  
+Here is the confusion matrix of the _Logistic Regression_ model:  
+```{r, confmatrix glm}
+confusionMatrix(data = glm_pred, reference = validation$y, positive = "yes")
+```
+Calculated the Confusion Matrix, we have:  
+The _sensitivity_ is  
+```{r, glm model sensitivity}
+glm_sense = caret::sensitivity(glm_pred, validation$y)
+print(glm_sense)
+```
+The _specificity_ is  
+```{r, glm model specificity}
+glm_spec = caret::specificity(glm_pred, validation$y)
+print(glm_spec)
+```
+The _F1 score_ is    
+```{r, glm F1_score}
+glm_f1 = 2*(glm_sense * glm_spec)/(glm_sense + glm_spec)
+print(glm_f1)
+```
+So that our _F1 score_ is a very good score in the range from 0 to 1.
+
+## AUC of Logistic Regression model  
+The AUC of _Logistic Regression_ model is  
+```{r, glm AUC}
+glm_AUC = round(AUC::auc(roc(glm_pred, validation$y)),2)
+print(glm_AUC)
+```
+The AUC of _Logistic Regression_ model is better than the Decision Tree and Random Forest.
+
+
+# Comparing the models performance  
+
+Here is the performance of our models:  
+```{r, echo = FALSE}
+df <- data.frame(Models = c("Decision Tree", "Random Forest", "Logistic Regresion"), 
+                 F1_score = c(decis_f1, rf_f1, glm_f1), 
+                 AUC = c(decis_AUC, rf_AUC, glm_AUC))
+print(df)
+```
+
+Let's also plot the models ROC curve to visualize the performance:  
+```{r, AUC plot, echo = FALSE}
+model <- data.table(cbind(decis_pred, glm_pred, rf_tuned_pred))
+        
+        plot(roc(decis_pred, validation$y), col="black")
+        plot(roc(glm_pred, validation$y), add = TRUE, col="red") 
+        plot(roc(rf_tuned_pred, validation$y), add = TRUE, col="cyan")
+        
+        legend("bottomright", legend=c(paste0("Decision Tree: ", round(AUC::auc(roc(decis_pred, validation$y)),2)),
+          paste0("Logistic Regression: ", round(AUC::auc(roc(glm_pred, validation$y)),2)),
+                                       paste0("Random Forest: ", round(AUC::auc(roc(rf_tuned_pred, validation$y)),2))),
+               col=c("black","red","cyan"), lty=1, cex=0.8)
+        title(main = "AUC Comparison", sub = "Multiple Model")
+
+```
+
+So that, _Logistic Regression_ is the best performing models in this project.  
+
+# Testing on test set  
+
+Let's test _Logistic Regression_ model on the _test_ dataset.  
+
+## Predict the test dataset  
+
+```{r}
+glm_test_pred = predict(glm_fit, test, type = 'response')
+head(glm_test_pred)
+```
+
+## Calculating threshold value for test dataset  
+
+Again, we will try different threshold to find the best one:
+```{r, threshold glm test}
+prob_test = seq(0, 1, length.out = 10)
+error_test = data.frame(matrix(ncol = 3, nrow = 0))
+for (i in prob_test) {
+  split = ifelse(glm_test_pred >= i, 'yes', 'no')
+  error_yes = 100*sum(ifelse(split == 'yes' & test$y=='no', 1,0))/length(split)
+  error_no = 100*sum(ifelse(split == 'no' & test$y=='yes', 1,0))/length(split)
+  auc = round(AUC::auc(roc(split, test$y)),2)
+  col = cbind(i,auc, error_yes, error_no, tot_error = sum(error_yes, error_no))
+  error_test = rbind(error_test,col)
+  
+} 
+error_test_results = error_test[error_test$auc == max(error_test$auc),]
+print(error_test_results)
+```
+So that, the threshold *0.1111* is the threshold with the highest AUC with only 13% guessing wrong for **yes**. We will use this to evaluate the model on the _test_ dataset.
+
+The code below will determine either a client in _test_ dataset is **yes** or **no**.  
+```{r, glm pred test}
+glm_test_pred_res = factor(ifelse(glm_test_pred >= error_test_results$i, "yes", "no"), 
+                           levels = levels(test$y))
+```
+## F1 Score of Logistic Regression model  
+
+Here is the confusion matrix of the _Logistic Regression_ model:  
+The _sensitivity_ is  
+```{r, confmatrix glm test}
+confusionMatrix(data = glm_test_pred_res, reference = test$y, positive = "yes")
+```
+```{r, glm test model sensitivity}
+glm_test_sense = caret::sensitivity(glm_test_pred_res, test$y)
+print(glm_sense)
+```
+The _specificity_ is  
+```{r, glm test model specificity}
+glm_test_spec = caret::specificity(glm_test_pred_res, test$y)
+print(glm_spec)
+```
+The _F1 score_ is  
+```{r, glm test F1_score}
+glm_test_f1 = 2*(glm_test_sense * glm_test_spec)/(glm_test_sense + glm_test_spec)
+print(glm_f1)
+```
+
+
+## AUC of Logistic Regression model  
+
+The AUC of _Logistic Regression_ model is  
+```{r, glm AUC test}
+glm_test_AUC = round(AUC::auc(roc(glm_test_pred_res, test$y)),2)
+print(glm_test_AUC)
+```
+
+
+# Results  
+
+So that, the best performing model is _Logistic Regression_ model with the F1 score on test set is 0.87 and AUC on test set is 0.87 (with _threshold at 0.1111_).  
+On the range from 0 to 1, this model F1 score is considered very good nearly 0.9 out of 1. And the AUC is scored at the similar score in the same range. This high AUC means this model have a very good performance at distinguishing between the positive and negative classes.
+
+# Conclusion  
+
+In this reports, we used three models _Decision Tree_, _Random Forest_ and _Logistic Regression_ to **predict whether one contact in the dataset resulted in a bank term deposit or not**.  
+
+After training, validating and testing on 3 datasets _train_, _validation_ and _test_. The best performing model is _Logistic Regression_ with **AUC of 0.87** and **F1-score of 0.87** on the _test_ dataset.  
+
+The project has not make use of any robust or boosted version of these models and other more advanced algorithm to predict. So that, in future work, boosted versions and more advanced algorithm would be used to predict and have a better performance score.
