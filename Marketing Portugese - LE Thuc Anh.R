@@ -27,7 +27,7 @@ bank_full <- fread(unzip(zip1,"bank-additional/bank-additional-full.csv"))
 # rename column to avoid error while running models
 setnames(bank_full, c("emp.var.rate", "cons.price.idx", "cons.conf.idx", "nr.employed") , 
          c("emp_var_rate", "cons_price_idx", "cons_conf_idx", "nr_employed"))
-```
+
 
 
 
